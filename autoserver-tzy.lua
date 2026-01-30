@@ -1,4 +1,4 @@
---==[ ADVANCED SERVER HOPPER – 3 MODE + COOLDOWN + PARTIAL RESET + SMART SIMPLE ]==--
+--==[ ADVANCED SERVER HOPPER – 3 MODE + COOLDOWN + PARTIAL RESET + SMART SIMPLE + JOBID LOG ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -156,7 +156,7 @@ else
 end
 
 ----------------------------------------------------------------
--- 🧠 SMART Simple rejoin dengan cooldown + anti visited
+-- 🧠 SMART Simple rejoin dengan cooldown + anti visited + log JobId
 ----------------------------------------------------------------
 local function SimpleRejoin()
     local waitTime = math.random(CONFIG.SimpleRejoinCooldownMin, CONFIG.SimpleRejoinCooldownMax)
@@ -209,6 +209,7 @@ local function SimpleRejoin()
             if best then
                 warn(("[ServerHop] Smart simple: teleport ke server lain (%d/%d pemain).")
                     :format(best.playing, best.max))
+                warn(("[ServerHop] Smart simple JobId: %s"):format(best.id))
 
                 if CONFIG.RememberVisited then
                     visited[best.id] = true
@@ -431,10 +432,11 @@ if not target then
 end
 
 ----------------------------------------------------------------
--- 🚀 Teleport ke server target
+-- 🚀 Teleport ke server target (log JobId juga)
 ----------------------------------------------------------------
-print(("[ServerHop] Mode: %s | Teleport ke server %s (%d/%d pemain)")
-    :format(mode, target.id, target.playing, target.max))
+print(("[ServerHop] Mode: %s | Teleport ke server (%d/%d pemain)")
+    :format(mode, target.playing, target.max))
+print(("[ServerHop] JobId target: %s"):format(target.id))
 
 if CONFIG.RememberVisited then
     visited[target.id] = true
