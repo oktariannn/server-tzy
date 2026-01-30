@@ -1,4 +1,4 @@
---==[ ADVANCED SERVER HOPPER – MINIMAL 4 PLAYER ]==--
+--==[ ADVANCED SERVER HOPPER – MINIMAL 4 PLAYER + SMART REJOIN ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -22,7 +22,7 @@ local CONFIG = {
     ResetVisitedAfter   = 150,  -- kalau visited > ini, reset list
 
     FetchCooldown       = 0.4,  -- delay antar request server list (detik)
-    SafeHopCooldownMin  = 8,    -- kalau kena 429: tunggu random X–Y detik
+    SafeHopCooldownMin  = 15,    -- kalau kena 429: tunggu random X–Y detik
     SafeHopCooldownMax  = 14,
 }
 
@@ -53,7 +53,7 @@ local function countVisited()
     return n
 end
 
--- Jangan pernah balik ke server sekarang
+-- Jangan pernah balik ke server sekarang (kalau bisa)
 if CONFIG.RememberVisited and currentJobId then
     visited[currentJobId] = true
 end
@@ -111,10 +111,78 @@ else
 end
 
 ----------------------------------------------------------------
--- 🪂 Fallback: simple rejoin
+-- 🧠 SMART REJOIN: coba cari server lain dulu sebelum rejoin random
 ----------------------------------------------------------------
 local function SimpleRejoin()
-    warn("[ServerHop] Mode simple: rejoin random server di place.")
+    warn("[ServerHop] Mode smart-simple: coba cari server lain sebelum rejoin random.")
+
+    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
+        :format(placeId)
+
+    local okHttp, result = pcall(function()
+        return game:HttpGet(url)
+    end)
+
+    if okHttp then
+        local okDecode, decoded = pcall(function()
+            return HttpService:JSONDecode(result)
+        end)
+
+        if okDecode and decoded and decoded.data then
+            local best
+
+            for _, server in ipairs(decoded.data) do
+                local sid     = server.id
+                local playing = server.playing
+                local maxPlr  = server.maxPlayers
+
+                local notFull    = playing < maxPlr
+                local notCurrent = sid ~= currentJobId
+                local notVisited = (not CONFIG.RememberVisited) or (not visited[sid])
+
+                -- Di smart rejoin kita boleh lebih fleksibel:
+                -- minimal 1 player, tapi tetap prefer yang rame
+                if notFull and notCurrent and notVisited and playing >= 1 then
+                    local score = playing + math.random()
+                    if not best or score > best.score then
+                        best = {
+                            id      = sid,
+                            playing = playing,
+                            max     = maxPlr,
+                            score   = score,
+                        }
+                    end
+                end
+            end
+
+            if best then
+                warn(("[ServerHop] Smart rejoin → teleport ke server lain (%d/%d pemain).")
+                    :format(best.playing, best.max))
+
+                if CONFIG.RememberVisited then
+                    visited[best.id] = true
+                end
+
+                local okTp, errTp = pcall(function()
+                    TeleportService:TeleportToPlaceInstance(placeId, best.id, LocalPlayer)
+                end)
+                if not okTp then
+                    warn("[ServerHop] Teleport smart rejoin gagal:", errTp)
+                end
+                return
+            else
+                warn("[ServerHop] Smart rejoin: tidak ditemukan server lain yang valid dari 1 page.")
+            end
+        else
+            warn("[ServerHop] Smart rejoin: gagal decode server list.")
+        end
+    else
+        local msg = tostring(result)
+        warn("[ServerHop] Smart rejoin gagal ambil server list:", msg)
+    end
+
+    -- Fallback terakhir: benar-benar rejoin random
+    warn("[ServerHop] Smart rejoin gagal, rejoin random biasa.")
     local okTp, err = pcall(function()
         TeleportService:Teleport(placeId, LocalPlayer)
     end)
@@ -209,7 +277,7 @@ print(("[ServerHop] Target server utama: %d–%d pemain"):format(CONFIG.MinPlaye
 print(("[ServerHop] Minimal pemain untuk backup server: %d+"):format(CONFIG.MinBackupPlayers))
 
 ----------------------------------------------------------------
--- 🔎 Kumpulkan kandidat server (≥ 4 player SELALU)
+-- 🔎 Kumpulkan kandidat server (≥ 4 player SELALU untuk advanced)
 ----------------------------------------------------------------
 local candidates = {} -- dalam range utama (4–14)
 local backups    = {} -- di luar range utama, tapi masih >=4 player
@@ -237,7 +305,7 @@ for page = 1, CONFIG.MaxPagesToScan do
         local inRangeMain = playing >= CONFIG.MinPlayers and playing <= CONFIG.MaxPlayers
         local notVisited  = (not CONFIG.RememberVisited) or (not visited[sid])
 
-        -- 🔴 Hard limit: cuma terima server dengan >= MinBackupPlayers (>=4)
+        -- Hard limit advanced: cuma terima >= MinBackupPlayers (>=4)
         local okAtAll     = playing >= CONFIG.MinBackupPlayers
 
         if notFull and notVisited and okAtAll then
@@ -296,7 +364,7 @@ if not target then
 end
 
 if not target then
-    warn("[ServerHop] Tidak ada server lain yang >= 4 pemain dari server list. Rejoin biasa.")
+    warn("[ServerHop] Tidak ada server lain yang >= 4 pemain dari server list. Smart rejoin.")
     SimpleRejoin()
     return
 end
@@ -324,4 +392,3 @@ if not okTp then
              "Ini batas dari Roblox, bukan dari script. Coba lagi nanti atau ganti game.")
     end
 end
-
