@@ -300,7 +300,7 @@ if not target then
         mode   = "backup"
         warn(("[ServerHop] Tidak ada server di range utama, pakai backup (>= %d pemain).")
             :format(CONFIG.MinBackupPlayers))
-    elseif CONFIG.AllowSoloLastResort and #lastResorts > 0 then
+    elseif CONFIG.AllowSoloLastResort and #lastResorts > 1 then
         target = pickBest(lastResorts)
         mode   = "last_resort"
         warn("[ServerHop] Tidak ada server ideal, pakai server terbaik yang tersisa (bisa saja 1 player).")
@@ -336,3 +336,4 @@ if not okTp then
              "Ini batas dari Roblox, bukan dari script. Coba lagi nanti atau ganti game.")
     end
 end
+
