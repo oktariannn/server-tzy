@@ -6,14 +6,19 @@ end
 
 -- Konfigurasi umum
 local CONFIG = {
-    DelayBeforeStart   = 5,   -- jeda sebelum mulai hop (detik)
-    MinPlayers         = 7,    -- minimal pemain di server tujuan
-    MaxPlayers         = 15,   -- maksimal pemain di server tujuan
-    MaxPagesToScan     = 6,    -- maksimal halaman server yang discan
-    RandomStartPage    = true, -- mulai dari page acak
-    UseAntiFriend      = true, -- cek teman di server sekarang
-    RememberVisited    = true, -- ingat server yang sudah dikunjungi
-    ResetVisitedAfter  = 150,  -- kalau visited > ini, reset list
+    DelayBeforeStart    = 5,    -- jeda sebelum mulai hop (detik)
+    MinPlayers          = 7,    -- minimal pemain di server tujuan (utama)
+    MaxPlayers          = 15,   -- maksimal pemain di server tujuan
+    MaxPagesToScan      = 6,    -- maksimal halaman server yang discan
+    RandomStartPage     = true, -- mulai dari page acak
+    UseAntiFriend       = true, -- cek teman di server sekarang
+    RememberVisited     = true, -- ingat server yang sudah dikunjungi
+    ResetVisitedAfter   = 150,  -- kalau visited > ini, reset list
+
+    -- 🔹 Minimal pemain untuk server cadangan (backup)
+    --    jadi kalau tidak ada server 7–15 player,
+    --    dia tetap tidak akan pilih server 1 player.
+    MinBackupPlayers    = 2,
 }
 
 task.wait(CONFIG.DelayBeforeStart)
@@ -24,6 +29,7 @@ local HttpService     = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 local placeId     = game.PlaceId
+local currentJobId = game.JobId
 
 math.randomseed(os.time())
 
@@ -38,6 +44,11 @@ local function countVisited()
     local n = 0
     for _ in pairs(visited) do n += 1 end
     return n
+end
+
+-- 🚫 Jangan pernah balik ke server sekarang
+if CONFIG.RememberVisited and currentJobId then
+    visited[currentJobId] = true
 end
 
 if CONFIG.RememberVisited and countVisited() > CONFIG.ResetVisitedAfter then
@@ -189,16 +200,18 @@ if CONFIG.RandomStartPage then
     print("[ServerHop] Mulai scan dari page acak, skip halaman:", skipPages)
 end
 
-print(("[ServerHop] Target server: %d–%d pemain"):format(CONFIG.MinPlayers, CONFIG.MaxPlayers))
+print(("[ServerHop] Target server utama: %d–%d pemain"):format(CONFIG.MinPlayers, CONFIG.MaxPlayers))
+print(("[ServerHop] Minimal pemain untuk backup server: %d+"):format(CONFIG.MinBackupPlayers))
 
 ----------------------------------------------------------------
 -- 🔎 Kumpulkan kandidat server
 --     - tidak penuh
---     - jumlah pemain di range
+--     - jumlah pemain di range utama
 --     - belum pernah dikunjungi (kalau RememberVisited = true)
+--     - backup: tetap hindari server 1 player
 ----------------------------------------------------------------
 local candidates = {}
-local backups    = {}  -- server yang tidak masuk range player tapi bisa join
+local backups    = {}  -- server yang tidak masuk range player utama tapi masih layak
 
 for page = 1, CONFIG.MaxPagesToScan do
     local servers = GetServers()
@@ -209,9 +222,12 @@ for page = 1, CONFIG.MaxPagesToScan do
         local playing   = server.playing
         local maxPlr    = server.maxPlayers
 
-        local notFull   = playing < maxPlr
-        local inRange   = playing >= CONFIG.MinPlayers and playing <= CONFIG.MaxPlayers
+        local notFull    = playing < maxPlr
+        local inRange    = playing >= CONFIG.MinPlayers and playing <= CONFIG.MaxPlayers
         local notVisited = (not CONFIG.RememberVisited) or (not visited[sid])
+
+        -- 🔹 Hindari server yang kosong / 1 pemain untuk backup
+        local okForBackup = playing >= CONFIG.MinBackupPlayers
 
         if notFull and notVisited then
             local info = {
@@ -228,7 +244,7 @@ for page = 1, CONFIG.MaxPagesToScan do
 
             if inRange then
                 table.insert(candidates, info)
-            else
+            elseif okForBackup then
                 table.insert(backups, info)
             end
         end
@@ -255,7 +271,7 @@ local target = pickBest(candidates)
 
 if not target then
     if #backups > 0 then
-        warn("[ServerHop] Tidak ada server pas 7–15 pemain, pakai server cadangan.")
+        warn("[ServerHop] Tidak ada server pas di range utama, pakai server cadangan (>= " .. CONFIG.MinBackupPlayers .. " pemain).")
         target = pickBest(backups)
     else
         warn("[ServerHop] Tidak ada server lain yang bisa dimasuki (advanced). Rejoin biasa.")
@@ -287,4 +303,3 @@ if not okTp then
              "Ini batas server, bukan script. Coba lagi nanti atau ganti game.")
     end
 end
-
