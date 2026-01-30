@@ -1,4 +1,4 @@
---==[ ADVANCED SERVER HOPPER – ADAPTIVE TRAFFIC ]==--
+--==[ ADVANCED SERVER HOPPER – MINIMAL 4 PLAYER ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -7,10 +7,14 @@ end
 -- 🔧 KONFIGURASI
 local CONFIG = {
     DelayBeforeStart    = 8,    -- jeda sebelum mulai hop (detik)
-    MinPlayers          = 4,    -- RANGE UTAMA: minimal pemain di server utama
-    MaxPlayers          = 14,   -- RANGE UTAMA: maksimal pemain di server utama
 
-    MinBackupPlayers    = 2,    -- BACKUP: minimal pemain (hindari server kosong)
+    -- RANGE UTAMA
+    MinPlayers          = 4,    -- minimal pemain server utama
+    MaxPlayers          = 14,   -- maksimal pemain server utama
+
+    -- BACKUP (kalau nggak ada di range utama)
+    MinBackupPlayers    = 4,    -- minimal pemain untuk backup (tetap >=4)
+
     MaxPagesToScan      = 4,    -- makin besar makin berat & rawan 429
     RandomStartPage     = false,-- demi anti 429, false lebih stabil
     UseAntiFriend       = true, -- cek teman di server sekarang
@@ -20,9 +24,6 @@ local CONFIG = {
     FetchCooldown       = 0.4,  -- delay antar request server list (detik)
     SafeHopCooldownMin  = 8,    -- kalau kena 429: tunggu random X–Y detik
     SafeHopCooldownMax  = 14,
-
-    -- Fallback paling terakhir: boleh pakai server 1 player?
-    AllowSoloLastResort = true, -- kalau false: baru simple rejoin
 }
 
 task.wait(CONFIG.DelayBeforeStart)
@@ -208,11 +209,10 @@ print(("[ServerHop] Target server utama: %d–%d pemain"):format(CONFIG.MinPlaye
 print(("[ServerHop] Minimal pemain untuk backup server: %d+"):format(CONFIG.MinBackupPlayers))
 
 ----------------------------------------------------------------
--- 🔎 Kumpulkan kandidat server
+-- 🔎 Kumpulkan kandidat server (≥ 4 player SELALU)
 ----------------------------------------------------------------
-local candidates   = {} -- dalam range utama (paling ideal)
-local backups      = {} -- di luar range utama, tapi masih manusiawi
-local lastResorts  = {} -- fallback TERAKHIR: apa pun yang masih bisa dimasuki
+local candidates = {} -- dalam range utama (4–14)
+local backups    = {} -- di luar range utama, tapi masih >=4 player
 
 for page = 1, CONFIG.MaxPagesToScan do
     if RATE_LIMITED then
@@ -236,9 +236,11 @@ for page = 1, CONFIG.MaxPagesToScan do
         local notFull     = playing < maxPlr
         local inRangeMain = playing >= CONFIG.MinPlayers and playing <= CONFIG.MaxPlayers
         local notVisited  = (not CONFIG.RememberVisited) or (not visited[sid])
-        local okForBackup = playing >= CONFIG.MinBackupPlayers
 
-        if notFull and notVisited then
+        -- 🔴 Hard limit: cuma terima server dengan >= MinBackupPlayers (>=4)
+        local okAtAll     = playing >= CONFIG.MinBackupPlayers
+
+        if notFull and notVisited and okAtAll then
             local info = {
                 id      = sid,
                 playing = playing,
@@ -253,19 +255,9 @@ for page = 1, CONFIG.MaxPagesToScan do
 
             if inRangeMain then
                 table.insert(candidates, info)
-            elseif okForBackup then
+            else
                 table.insert(backups, info)
             end
-
-            -- Last resort: simpan server mana pun yg valid join (termasuk 1 player)
-            -- kita simpan dengan skor = jumlah player (biar pilih yang paling rame).
-            local lr = {
-                id      = sid,
-                playing = playing,
-                max     = maxPlr,
-                score   = playing + math.random(),
-            }
-            table.insert(lastResorts, lr)
         end
     end
 
@@ -300,15 +292,11 @@ if not target then
         mode   = "backup"
         warn(("[ServerHop] Tidak ada server di range utama, pakai backup (>= %d pemain).")
             :format(CONFIG.MinBackupPlayers))
-    elseif CONFIG.AllowSoloLastResort and #lastResorts > 0 then
-        target = pickBest(lastResorts)
-        mode   = "last_resort"
-        warn("[ServerHop] Tidak ada server ideal, pakai server terbaik yang tersisa (bisa saja 1 player).")
     end
 end
 
 if not target then
-    warn("[ServerHop] Tidak ada server lain yang bisa dimasuki dari server list. Rejoin biasa.")
+    warn("[ServerHop] Tidak ada server lain yang >= 4 pemain dari server list. Rejoin biasa.")
     SimpleRejoin()
     return
 end
