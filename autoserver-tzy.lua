@@ -1,4 +1,4 @@
---==[ ADVANCED SERVER HOPPER – AGRESIF + ANTI 429 ]==--
+--==[ ADVANCED SERVER HOPPER – ADAPTIVE TRAFFIC ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -6,12 +6,13 @@ end
 
 -- 🔧 KONFIGURASI
 local CONFIG = {
-    DelayBeforeStart    = 12,   -- jeda sebelum mulai hop (detik)
-    MinPlayers          = 7,    -- minimal pemain di server utama
-    MaxPlayers          = 15,   -- maksimal pemain di server utama
-    MinBackupPlayers    = 3,    -- minimal pemain untuk server cadangan (hindari 1 player)
-    MaxPagesToScan      = 3,    -- semakin besar, semakin berat & rawan 429
-    RandomStartPage     = false,-- demi anti 429, lebih stabil kalau false
+    DelayBeforeStart    = 8,    -- jeda sebelum mulai hop (detik)
+    MinPlayers          = 4,    -- RANGE UTAMA: minimal pemain di server utama
+    MaxPlayers          = 14,   -- RANGE UTAMA: maksimal pemain di server utama
+
+    MinBackupPlayers    = 2,    -- BACKUP: minimal pemain (hindari server kosong)
+    MaxPagesToScan      = 4,    -- makin besar makin berat & rawan 429
+    RandomStartPage     = false,-- demi anti 429, false lebih stabil
     UseAntiFriend       = true, -- cek teman di server sekarang
     RememberVisited     = true, -- ingat server yang sudah dikunjungi
     ResetVisitedAfter   = 150,  -- kalau visited > ini, reset list
@@ -19,6 +20,9 @@ local CONFIG = {
     FetchCooldown       = 0.4,  -- delay antar request server list (detik)
     SafeHopCooldownMin  = 8,    -- kalau kena 429: tunggu random X–Y detik
     SafeHopCooldownMax  = 14,
+
+    -- Fallback paling terakhir: boleh pakai server 1 player?
+    AllowSoloLastResort = true, -- kalau false: baru simple rejoin
 }
 
 task.wait(CONFIG.DelayBeforeStart)
@@ -34,7 +38,7 @@ local currentJobId = game.JobId
 math.randomseed(os.time())
 
 ----------------------------------------------------------------
--- 🔁 GLOBAL visited server list (supaya ingat lewat teleport)
+-- 🔁 visited server list (supaya ingat lewat teleport)
 ----------------------------------------------------------------
 local env = getgenv and getgenv() or _G
 env.AdvServerHopVisited = env.AdvServerHopVisited or {}
@@ -119,7 +123,7 @@ local function SimpleRejoin()
 end
 
 ----------------------------------------------------------------
--- 🛡 Mode SAFE-HOP (kalau kena 429 / rate limit)
+-- 🛡 SAFE-HOP (kalau kena 429 / rate limit)
 ----------------------------------------------------------------
 local function SafeHopRateLimited()
     local waitTime = math.random(CONFIG.SafeHopCooldownMin, CONFIG.SafeHopCooldownMax)
@@ -186,7 +190,7 @@ local function GetServers()
 end
 
 ----------------------------------------------------------------
--- 🎲 (Opsional) Skip ke page acak – dimatikan default demi anti 429
+-- 🎲 Random start page (optional, default off)
 ----------------------------------------------------------------
 if CONFIG.RandomStartPage then
     local maxSkip = math.max(0, CONFIG.MaxPagesToScan - 1)
@@ -206,8 +210,9 @@ print(("[ServerHop] Minimal pemain untuk backup server: %d+"):format(CONFIG.MinB
 ----------------------------------------------------------------
 -- 🔎 Kumpulkan kandidat server
 ----------------------------------------------------------------
-local candidates = {} -- dalam range utama
-local backups    = {} -- di luar range utama, tapi masih layak
+local candidates   = {} -- dalam range utama (paling ideal)
+local backups      = {} -- di luar range utama, tapi masih manusiawi
+local lastResorts  = {} -- fallback TERAKHIR: apa pun yang masih bisa dimasuki
 
 for page = 1, CONFIG.MaxPagesToScan do
     if RATE_LIMITED then
@@ -219,7 +224,6 @@ for page = 1, CONFIG.MaxPagesToScan do
         if RATE_LIMITED then
             break
         end
-        -- kalau cuma error biasa, hentikan scanning
         warn("[ServerHop] Server list kosong / gagal di page", page)
         break
     end
@@ -245,13 +249,23 @@ for page = 1, CONFIG.MaxPagesToScan do
             -- Skor: makin dekat ke tengah range, makin bagus
             local mid  = (CONFIG.MinPlayers + CONFIG.MaxPlayers) / 2
             local dist = math.abs(playing - mid)
-            info.score = -dist + math.random() -- sedikit random biar variatif
+            info.score = -dist + math.random()
 
             if inRangeMain then
                 table.insert(candidates, info)
             elseif okForBackup then
                 table.insert(backups, info)
             end
+
+            -- Last resort: simpan server mana pun yg valid join (termasuk 1 player)
+            -- kita simpan dengan skor = jumlah player (biar pilih yang paling rame).
+            local lr = {
+                id      = sid,
+                playing = playing,
+                max     = maxPlr,
+                score   = playing + math.random(),
+            }
+            table.insert(lastResorts, lr)
         end
     end
 
@@ -260,7 +274,6 @@ for page = 1, CONFIG.MaxPagesToScan do
     end
 end
 
--- Kalau kena rate limit di tengah jalan → SAFE-HOP
 if RATE_LIMITED then
     SafeHopRateLimited()
     return
@@ -279,24 +292,32 @@ local function pickBest(list)
 end
 
 local target = pickBest(candidates)
+local mode   = "utama"
 
 if not target then
     if #backups > 0 then
+        target = pickBest(backups)
+        mode   = "backup"
         warn(("[ServerHop] Tidak ada server di range utama, pakai backup (>= %d pemain).")
             :format(CONFIG.MinBackupPlayers))
-        target = pickBest(backups)
-    else
-        warn("[ServerHop] Tidak ada server lain yang bisa dimasuki dari server list. Rejoin biasa.")
-        SimpleRejoin()
-        return
+    elseif CONFIG.AllowSoloLastResort and #lastResorts > 0 then
+        target = pickBest(lastResorts)
+        mode   = "last_resort"
+        warn("[ServerHop] Tidak ada server ideal, pakai server terbaik yang tersisa (bisa saja 1 player).")
     end
+end
+
+if not target then
+    warn("[ServerHop] Tidak ada server lain yang bisa dimasuki dari server list. Rejoin biasa.")
+    SimpleRejoin()
+    return
 end
 
 ----------------------------------------------------------------
 -- 🚀 Teleport ke server target
 ----------------------------------------------------------------
-print(("[ServerHop] Teleport ke server %s (%d/%d pemain)")
-    :format(target.id, target.playing, target.max))
+print(("[ServerHop] Mode: %s | Teleport ke server %s (%d/%d pemain)")
+    :format(mode, target.id, target.playing, target.max))
 
 if CONFIG.RememberVisited then
     visited[target.id] = true
