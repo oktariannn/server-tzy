@@ -1,4 +1,4 @@
---==[ ADVANCED SERVER HOPPER – 3 MODE + COOLDOWN + PARTIAL RESET ]==--
+--==[ ADVANCED SERVER HOPPER – 3 MODE + COOLDOWN + PARTIAL RESET + SMART SIMPLE ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -156,14 +156,83 @@ else
 end
 
 ----------------------------------------------------------------
--- 🪂 Simple rejoin dengan cooldown (kurangi balik ke server sama)
+-- 🧠 SMART Simple rejoin dengan cooldown + anti visited
 ----------------------------------------------------------------
 local function SimpleRejoin()
     local waitTime = math.random(CONFIG.SimpleRejoinCooldownMin, CONFIG.SimpleRejoinCooldownMax)
-    warn(("[ServerHop] Mode simple: cooldown %d detik sebelum rejoin random server.")
+    warn(("[ServerHop] Mode simple: cooldown %d detik sebelum cari server lain.")
         :format(waitTime))
     task.wait(waitTime)
 
+    -- Coba ambil 1 page server list dan pilih server lain yang:
+    -- - tidak penuh
+    -- - JobId beda
+    -- - bukan visited
+    -- - minimal 1 player
+    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
+        :format(placeId)
+
+    local okHttp, result = pcall(function()
+        return game:HttpGet(url)
+    end)
+
+    if okHttp then
+        local okDecode, decoded = pcall(function()
+            return HttpService:JSONDecode(result)
+        end)
+
+        if okDecode and decoded and decoded.data then
+            local best
+
+            for _, server in ipairs(decoded.data) do
+                local sid     = server.id
+                local playing = server.playing
+                local maxPlr  = server.maxPlayers
+
+                local notFull    = playing < maxPlr
+                local notCurrent = sid ~= currentJobId
+                local notVisited = (not CONFIG.RememberVisited) or (not visited[sid])
+
+                if notFull and notCurrent and notVisited and playing >= 1 then
+                    local score = playing + math.random()
+                    if not best or score > best.score then
+                        best = {
+                            id      = sid,
+                            playing = playing,
+                            max     = maxPlr,
+                            score   = score,
+                        }
+                    end
+                end
+            end
+
+            if best then
+                warn(("[ServerHop] Smart simple: teleport ke server lain (%d/%d pemain).")
+                    :format(best.playing, best.max))
+
+                if CONFIG.RememberVisited then
+                    visited[best.id] = true
+                end
+
+                local okTp, errTp = pcall(function()
+                    TeleportService:TeleportToPlaceInstance(placeId, best.id, LocalPlayer)
+                end)
+                if not okTp then
+                    warn("[ServerHop] Teleport smart simple gagal:", errTp)
+                end
+                return
+            else
+                warn("[ServerHop] Smart simple: tidak ada server lain (semua visited/penuh/0 player).")
+            end
+        else
+            warn("[ServerHop] Smart simple: gagal decode server list.")
+        end
+    else
+        warn("[ServerHop] Smart simple gagal ambil server list:", tostring(result))
+    end
+
+    -- Fallback terakhir: benar-benar rejoin random
+    warn("[ServerHop] Smart simple gagal, rejoin random server.")
     local okTp, err = pcall(function()
         TeleportService:Teleport(placeId, LocalPlayer)
     end)
@@ -356,7 +425,7 @@ if not target then
 end
 
 if not target then
-    warn("[ServerHop] Tidak ada server lain yang memenuhi semua mode. Simple rejoin dengan cooldown.")
+    warn("[ServerHop] Tidak ada server lain yang memenuhi semua mode. Simple rejoin dengan cooldown + anti visited.")
     SimpleRejoin()
     return
 end
