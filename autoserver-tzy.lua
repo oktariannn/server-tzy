@@ -1,4 +1,4 @@
---==[ ADVANCED SERVER HOPPER – 3 MODE (UTAMA / BACKUP / LAST_RESORT) ]==--
+--==[ ADVANCED SERVER HOPPER – 3 MODE + COOLDOWN + PARTIAL RESET ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -6,7 +6,7 @@ end
 
 -- 🔧 KONFIGURASI
 local CONFIG = {
-    DelayBeforeStart      = 15,    -- jeda sebelum mulai hop (detik)
+    DelayBeforeStart      = 8,    -- jeda sebelum mulai hop (detik)
 
     -- MODE UTAMA (medium traffic)
     MinPlayersMain        = 4,    -- minimal pemain server utama
@@ -15,18 +15,24 @@ local CONFIG = {
     -- MODE BACKUP (kalau nggak ada utama)
     MinPlayersBackup      = 3,    -- >2 player (3+)
 
-    -- MODE LAST_RESORT (game super sepi)
+    -- MODE LAST_RESORT (game super sepi tapi tetap >1 player)
     MinPlayersLastResort  = 2,    -- >1 player (2+)
 
     MaxPagesToScan        = 4,    -- makin besar makin berat & rawan 429
     RandomStartPage       = false,-- demi anti 429, false lebih stabil
     UseAntiFriend         = true, -- cek teman di server sekarang
+
     RememberVisited       = true, -- ingat server yang sudah dikunjungi
-    ResetVisitedAfter     = 150,  -- kalau visited > ini, reset list
+    ResetVisitedAfter     = 200,  -- jika total visited > ini → kompres
+    KeepVisitedAfter      = 80,   -- setelah kompres, usahakan sisa sekitar ini
 
     FetchCooldown         = 0.4,  -- delay antar request server list (detik)
     SafeHopCooldownMin    = 8,    -- kalau kena 429: tunggu random X–Y detik
     SafeHopCooldownMax    = 14,
+
+    -- Cooldown sebelum simple rejoin, mengurangi kemungkinan balik ke server sama
+    SimpleRejoinCooldownMin = 10,
+    SimpleRejoinCooldownMax = 18,
 }
 
 task.wait(CONFIG.DelayBeforeStart)
@@ -57,15 +63,51 @@ local function countVisited()
 end
 
 -- Jangan pernah balik ke server sekarang (kalau bisa)
-if CONFIG.RememberVisited and currentJobId then
+if CONFIG.RememberVisited and currentJobId and currentJobId ~= "" then
     visited[currentJobId] = true
 end
 
-if CONFIG.RememberVisited and countVisited() > CONFIG.ResetVisitedAfter then
-    visited = {}
+-- Partial reset: kalau kebanyakan, buang sebagian saja
+local function compactVisited()
+    local total = countVisited()
+    if not CONFIG.RememberVisited or total <= CONFIG.ResetVisitedAfter then
+        return
+    end
+
+    warn(("[ServerHop] visited server %d > %d, kompres list...")
+        :format(total, CONFIG.ResetVisitedAfter))
+
+    local keepTarget = CONFIG.KeepVisitedAfter
+    if keepTarget <= 0 then
+        -- fallback: full reset
+        for k in pairs(visited) do
+            visited[k] = nil
+        end
+        if currentJobId and currentJobId ~= "" then
+            visited[currentJobId] = true
+        end
+        env.AdvServerHopVisited = visited
+        warn("[ServerHop] visited di-reset total (fallback).")
+        return
+    end
+
+    -- hapus entri secara bertahap sampai mendekati keepTarget
+    local toRemove = math.max(0, total - keepTarget)
+    for jobId in pairs(visited) do
+        if toRemove <= 0 then
+            break
+        end
+        if jobId ~= currentJobId then
+            visited[jobId] = nil
+            toRemove -= 1
+        end
+    end
+
     env.AdvServerHopVisited = visited
-    warn("[ServerHop] Reset daftar visited server (kebanyakan).")
+    warn(("[ServerHop] visited dikompres. Sekarang ~%d server disimpan."):format(countVisited()))
 end
+
+compactVisited()
 
 ----------------------------------------------------------------
 -- 👥 Load daftar teman (kalau anti friend on)
@@ -114,10 +156,14 @@ else
 end
 
 ----------------------------------------------------------------
--- 🪂 Fallback: simple rejoin (kalau semua mode gagal)
+-- 🪂 Simple rejoin dengan cooldown (kurangi balik ke server sama)
 ----------------------------------------------------------------
 local function SimpleRejoin()
-    warn("[ServerHop] Mode simple: rejoin random server di place.")
+    local waitTime = math.random(CONFIG.SimpleRejoinCooldownMin, CONFIG.SimpleRejoinCooldownMax)
+    warn(("[ServerHop] Mode simple: cooldown %d detik sebelum rejoin random server.")
+        :format(waitTime))
+    task.wait(waitTime)
+
     local okTp, err = pcall(function()
         TeleportService:Teleport(placeId, LocalPlayer)
     end)
@@ -131,7 +177,8 @@ end
 ----------------------------------------------------------------
 local function SafeHopRateLimited()
     local waitTime = math.random(CONFIG.SafeHopCooldownMin, CONFIG.SafeHopCooldownMax)
-    warn(("[ServerHop] Roblox API rate-limited (HTTP 429). Tunggu %d detik lalu rejoin."):format(waitTime))
+    warn(("[ServerHop] Roblox API rate-limited (HTTP 429). Tunggu %d detik lalu rejoin.")
+        :format(waitTime))
     task.wait(waitTime)
 
     local okTp, err = pcall(function()
@@ -214,10 +261,7 @@ print(("[ServerHop] Mode: last_resort → >= %d pemain (lebih dari 1)")
     :format(CONFIG.MinPlayersLastResort))
 
 ----------------------------------------------------------------
--- 🔎 Kumpulkan kandidat server
---   - UTAMA       : 4–15 player
---   - BACKUP      : 3+ player (luar range utama)
---   - LAST_RESORT : 2+ player (bener-bener sepi tapi tetap >1)
+-- 🔎 Kumpulkan kandidat server: utama / backup / last_resort
 ----------------------------------------------------------------
 local candidates  = {} -- utama
 local backups     = {} -- backup
@@ -254,21 +298,20 @@ for page = 1, CONFIG.MaxPagesToScan do
                 score   = 0,
             }
 
-            -- Mode utama: 4–15
             if playing >= CONFIG.MinPlayersMain and playing <= CONFIG.MaxPlayersMain then
-                -- skor: makin dekat ke tengah range, makin bagus
+                -- Mode utama: 4–15 player, makin dekat tengah makin bagus
                 local mid  = (CONFIG.MinPlayersMain + CONFIG.MaxPlayersMain) / 2
                 local dist = math.abs(playing - mid)
                 info.score = -dist + math.random()
                 table.insert(candidates, info)
 
-            -- Mode backup: >2 (3+), di luar range utama
             elseif playing >= CONFIG.MinPlayersBackup then
-                info.score = playing + math.random() -- makin rame makin bagus
+                -- Mode backup: 3+ player, makin rame makin bagus
+                info.score = playing + math.random()
                 table.insert(backups, info)
 
-            -- Mode last_resort: >1 (2+), di luar backup
             elseif playing >= CONFIG.MinPlayersLastResort then
+                -- Mode last_resort: 2+ player, game sepi tapi tetap >1
                 info.score = playing + math.random()
                 table.insert(lastResorts, info)
             end
@@ -313,7 +356,7 @@ if not target then
 end
 
 if not target then
-    warn("[ServerHop] Tidak ada server lain yang memenuhi semua mode. Rejoin biasa.")
+    warn("[ServerHop] Tidak ada server lain yang memenuhi semua mode. Simple rejoin dengan cooldown.")
     SimpleRejoin()
     return
 end
