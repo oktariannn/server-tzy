@@ -1,4 +1,4 @@
---==[ ADVANCED SERVER HOPPER – ADAPTIVE TRAFFIC ]==--
+--==[ ADVANCED SERVER HOPPER – 3 MODE (UTAMA / BACKUP / LAST_RESORT) ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -6,23 +6,27 @@ end
 
 -- 🔧 KONFIGURASI
 local CONFIG = {
-    DelayBeforeStart    = 12,    -- jeda sebelum mulai hop (detik)
-    MinPlayers          = 4,    -- RANGE UTAMA: minimal pemain di server utama
-    MaxPlayers          = 14,   -- RANGE UTAMA: maksimal pemain di server utama
+    DelayBeforeStart      = 15,    -- jeda sebelum mulai hop (detik)
 
-    MinBackupPlayers    = 4,    -- BACKUP: minimal pemain (hindari server kosong)
-    MaxPagesToScan      = 4,    -- makin besar makin berat & rawan 429
-    RandomStartPage     = false,-- demi anti 429, false lebih stabil
-    UseAntiFriend       = true, -- cek teman di server sekarang
-    RememberVisited     = true, -- ingat server yang sudah dikunjungi
-    ResetVisitedAfter   = 150,  -- kalau visited > ini, reset list
+    -- MODE UTAMA (medium traffic)
+    MinPlayersMain        = 4,    -- minimal pemain server utama
+    MaxPlayersMain        = 15,   -- maksimal pemain server utama
 
-    FetchCooldown       = 0.4,  -- delay antar request server list (detik)
-    SafeHopCooldownMin  = 8,    -- kalau kena 429: tunggu random X–Y detik
-    SafeHopCooldownMax  = 14,
+    -- MODE BACKUP (kalau nggak ada utama)
+    MinPlayersBackup      = 3,    -- >2 player (3+)
 
-    -- Fallback paling terakhir: boleh pakai server 1 player?
-    AllowSoloLastResort = true, -- kalau false: baru simple rejoin
+    -- MODE LAST_RESORT (game super sepi)
+    MinPlayersLastResort  = 2,    -- >1 player (2+)
+
+    MaxPagesToScan        = 4,    -- makin besar makin berat & rawan 429
+    RandomStartPage       = false,-- demi anti 429, false lebih stabil
+    UseAntiFriend         = true, -- cek teman di server sekarang
+    RememberVisited       = true, -- ingat server yang sudah dikunjungi
+    ResetVisitedAfter     = 150,  -- kalau visited > ini, reset list
+
+    FetchCooldown         = 0.4,  -- delay antar request server list (detik)
+    SafeHopCooldownMin    = 8,    -- kalau kena 429: tunggu random X–Y detik
+    SafeHopCooldownMax    = 14,
 }
 
 task.wait(CONFIG.DelayBeforeStart)
@@ -52,7 +56,7 @@ local function countVisited()
     return n
 end
 
--- Jangan pernah balik ke server sekarang
+-- Jangan pernah balik ke server sekarang (kalau bisa)
 if CONFIG.RememberVisited and currentJobId then
     visited[currentJobId] = true
 end
@@ -110,7 +114,7 @@ else
 end
 
 ----------------------------------------------------------------
--- 🪂 Fallback: simple rejoin
+-- 🪂 Fallback: simple rejoin (kalau semua mode gagal)
 ----------------------------------------------------------------
 local function SimpleRejoin()
     warn("[ServerHop] Mode simple: rejoin random server di place.")
@@ -204,15 +208,20 @@ if CONFIG.RandomStartPage then
     print("[ServerHop] Mulai scan dari page acak, skip halaman:", skipPages)
 end
 
-print(("[ServerHop] Target server utama: %d–%d pemain"):format(CONFIG.MinPlayers, CONFIG.MaxPlayers))
-print(("[ServerHop] Minimal pemain untuk backup server: %d+"):format(CONFIG.MinBackupPlayers))
+print(("[ServerHop] Mode: utama → %d–%d pemain"):format(CONFIG.MinPlayersMain, CONFIG.MaxPlayersMain))
+print(("[ServerHop] Mode: backup → >= %d pemain"):format(CONFIG.MinPlayersBackup))
+print(("[ServerHop] Mode: last_resort → >= %d pemain (lebih dari 1)")
+    :format(CONFIG.MinPlayersLastResort))
 
 ----------------------------------------------------------------
 -- 🔎 Kumpulkan kandidat server
+--   - UTAMA       : 4–15 player
+--   - BACKUP      : 3+ player (luar range utama)
+--   - LAST_RESORT : 2+ player (bener-bener sepi tapi tetap >1)
 ----------------------------------------------------------------
-local candidates   = {} -- dalam range utama (paling ideal)
-local backups      = {} -- di luar range utama, tapi masih manusiawi
-local lastResorts  = {} -- fallback TERAKHIR: apa pun yang masih bisa dimasuki
+local candidates  = {} -- utama
+local backups     = {} -- backup
+local lastResorts = {} -- last_resort
 
 for page = 1, CONFIG.MaxPagesToScan do
     if RATE_LIMITED then
@@ -233,12 +242,11 @@ for page = 1, CONFIG.MaxPagesToScan do
         local playing   = server.playing
         local maxPlr    = server.maxPlayers
 
-        local notFull     = playing < maxPlr
-        local inRangeMain = playing >= CONFIG.MinPlayers and playing <= CONFIG.MaxPlayers
-        local notVisited  = (not CONFIG.RememberVisited) or (not visited[sid])
-        local okForBackup = playing >= CONFIG.MinBackupPlayers
+        local notFull    = playing < maxPlr
+        local notVisited = (not CONFIG.RememberVisited) or (not visited[sid])
+        local notCurrent = sid ~= currentJobId
 
-        if notFull and notVisited then
+        if notFull and notVisited and notCurrent then
             local info = {
                 id      = sid,
                 playing = playing,
@@ -246,26 +254,24 @@ for page = 1, CONFIG.MaxPagesToScan do
                 score   = 0,
             }
 
-            -- Skor: makin dekat ke tengah range, makin bagus
-            local mid  = (CONFIG.MinPlayers + CONFIG.MaxPlayers) / 2
-            local dist = math.abs(playing - mid)
-            info.score = -dist + math.random()
-
-            if inRangeMain then
+            -- Mode utama: 4–15
+            if playing >= CONFIG.MinPlayersMain and playing <= CONFIG.MaxPlayersMain then
+                -- skor: makin dekat ke tengah range, makin bagus
+                local mid  = (CONFIG.MinPlayersMain + CONFIG.MaxPlayersMain) / 2
+                local dist = math.abs(playing - mid)
+                info.score = -dist + math.random()
                 table.insert(candidates, info)
-            elseif okForBackup then
-                table.insert(backups, info)
-            end
 
-            -- Last resort: simpan server mana pun yg valid join (termasuk 1 player)
-            -- kita simpan dengan skor = jumlah player (biar pilih yang paling rame).
-            local lr = {
-                id      = sid,
-                playing = playing,
-                max     = maxPlr,
-                score   = playing + math.random(),
-            }
-            table.insert(lastResorts, lr)
+            -- Mode backup: >2 (3+), di luar range utama
+            elseif playing >= CONFIG.MinPlayersBackup then
+                info.score = playing + math.random() -- makin rame makin bagus
+                table.insert(backups, info)
+
+            -- Mode last_resort: >1 (2+), di luar backup
+            elseif playing >= CONFIG.MinPlayersLastResort then
+                info.score = playing + math.random()
+                table.insert(lastResorts, info)
+            end
         end
     end
 
@@ -298,17 +304,16 @@ if not target then
     if #backups > 0 then
         target = pickBest(backups)
         mode   = "backup"
-        warn(("[ServerHop] Tidak ada server di range utama, pakai backup (>= %d pemain).")
-            :format(CONFIG.MinBackupPlayers))
-    elseif CONFIG.AllowSoloLastResort and #lastResorts > 1 then
+        warn("[ServerHop] Mode backup aktif → pakai server >2 pemain (3+).")
+    elseif #lastResorts > 0 then
         target = pickBest(lastResorts)
         mode   = "last_resort"
-        warn("[ServerHop] Tidak ada server ideal, pakai server terbaik yang tersisa (bisa saja 1 player).")
+        warn("[ServerHop] Mode last_resort aktif → game sepi, pakai server terbaik yang >1 pemain.")
     end
 end
 
 if not target then
-    warn("[ServerHop] Tidak ada server lain yang bisa dimasuki dari server list. Rejoin biasa.")
+    warn("[ServerHop] Tidak ada server lain yang memenuhi semua mode. Rejoin biasa.")
     SimpleRejoin()
     return
 end
@@ -336,4 +341,3 @@ if not okTp then
              "Ini batas dari Roblox, bukan dari script. Coba lagi nanti atau ganti game.")
     end
 end
-
