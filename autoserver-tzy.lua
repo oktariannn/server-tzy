@@ -6,7 +6,7 @@ end
 
 -- 🔧 KONFIGURASI
 local CONFIG = {
-    DelayBeforeStart    = 8,    -- jeda sebelum mulai hop (detik)
+    DelayBeforeStart    = 15,    -- jeda sebelum mulai hop (detik)
 
     -- RANGE UTAMA
     MinPlayers          = 4,    -- minimal pemain server utama
@@ -324,3 +324,4 @@ if not okTp then
              "Ini batas dari Roblox, bukan dari script. Coba lagi nanti atau ganti game.")
     end
 end
+
