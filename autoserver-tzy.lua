@@ -1,5 +1,7 @@
---==[ ADVANCED SERVER HOPPER – 3 MODE + COOLDOWN + PARTIAL RESET
---     + SMART SIMPLE + JOBID LOG + AUTO LOOP + SAFE TELEPORT ]==--
+--==[ ADVANCED SERVER HOPPER – MINING MODE
+--  3 MODE + COOLDOWN + PARTIAL RESET
+--  + SMART SIMPLE + JOBID LOG + AUTO LOOP + SAFE TELEPORT
+--  + POST JOIN COOLDOWN ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -35,10 +37,14 @@ local CONFIG = {
     SimpleRejoinCooldownMin = 10,
     SimpleRejoinCooldownMax = 18,
 
-    -- 🔁 AUTO-LOOP UNTUK AFK JANGKA PANJANG
+    -- 🔁 AUTO-LOOP UNTUK AFK / MINING BERULANG
     AutoLoop              = true, -- true = hop terus menerus
-    LoopDelayMin          = 30,   -- jeda minimal antar HOP (detik)
-    LoopDelayMax          = 60,   -- jeda maksimal antar HOP (detik)
+    LoopDelayMin          = 20,   -- jeda minimal antar HOP (detik) → mining agresif
+    LoopDelayMax          = 35,   -- jeda maksimal antar HOP (detik)
+
+    -- ⏱️ Cooldown setelah baru join server (anti IsTeleporting / loading berat)
+    PostJoinCooldownMin   = 8,    -- tunggu sebentar setelah join sebelum cari server lagi
+    PostJoinCooldownMax   = 14,
 
     -- Kalau teleport utama gagal, coba fallback SimpleRejoin
     RetryOnTeleportFail   = true,
@@ -302,10 +308,19 @@ local function SafeHopRateLimited()
 end
 
 ----------------------------------------------------------------
--- 🔁 SATU SIKLUS HOP (bisa dipanggil berulang untuk AFK)
+-- 🔁 SATU SIKLUS HOP (bisa dipanggil berulang untuk AFK / MINING)
 ----------------------------------------------------------------
 local function DoOneHop()
     currentJobId = game.JobId  -- refresh kalau sudah pindah server
+
+    -- 🕒 Cooldown setelah join server (anti IsTeleporting / loading berat)
+    local joinWait = math.random(
+        CONFIG.PostJoinCooldownMin or 20,
+        CONFIG.PostJoinCooldownMax or 35
+    )
+    warn(("[ServerHop] Post-join cooldown %d detik (stabilisasi client)."):format(joinWait))
+    task.wait(joinWait)
+
     compactVisited()
 
     ----------------------------------------------------------------
@@ -500,7 +515,7 @@ local function DoOneHop()
 end
 
 ----------------------------------------------------------------
--- 🔁 MAIN LOOP – UNTUK AFK JANGKA PANJANG
+-- 🔁 MAIN LOOP – UNTUK MINING / AFK JANGKA PANJANG
 ----------------------------------------------------------------
 local function RunLoop()
     if not CONFIG.AutoLoop then
