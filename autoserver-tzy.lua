@@ -1,4 +1,5 @@
---==[ ADVANCED SERVER HOPPER – 3 MODE + COOLDOWN + PARTIAL RESET + SMART SIMPLE + JOBID LOG ]==--
+--==[ ADVANCED SERVER HOPPER – 3 MODE + COOLDOWN + PARTIAL RESET
+--     + SMART SIMPLE + JOBID LOG + AUTO LOOP ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -6,17 +7,17 @@ end
 
 -- 🔧 KONFIGURASI
 local CONFIG = {
-    DelayBeforeStart      = 8,    -- jeda sebelum mulai hop (detik)
+    DelayBeforeStart      = 8,    -- jeda sebelum mulai hop pertama (detik)
 
     -- MODE UTAMA (medium traffic)
     MinPlayersMain        = 4,    -- minimal pemain server utama
     MaxPlayersMain        = 15,   -- maksimal pemain server utama
 
     -- MODE BACKUP (kalau nggak ada utama)
-    MinPlayersBackup      = 3,    -- >2 player (3+)
+    MinPlayersBackup      = 3,    -- minimal pemain backup (3+)
 
-    -- MODE LAST_RESORT (game super sepi tapi tetap >1 player)
-    MinPlayersLastResort  = 2,    -- >1 player (2+)
+    -- MODE LAST_RESORT (game sepi tapi tetap tidak sendirian)
+    MinPlayersLastResort  = 2,    -- minimal pemain last_resort (2+)
 
     MaxPagesToScan        = 4,    -- makin besar makin berat & rawan 429
     RandomStartPage       = false,-- demi anti 429, false lebih stabil
@@ -33,6 +34,14 @@ local CONFIG = {
     -- Cooldown sebelum simple rejoin, mengurangi kemungkinan balik ke server sama
     SimpleRejoinCooldownMin = 10,
     SimpleRejoinCooldownMax = 18,
+
+    -- 🔁 AUTO-LOOP UNTUK AFK JANGKA PANJANG
+    AutoLoop              = true, -- true = hop terus menerus
+    LoopDelayMin          = 30,   -- jeda minimal antar HOP (detik)
+    LoopDelayMax          = 60,  -- jeda maksimal antar HOP (detik)
+
+    -- Kalau teleport utama gagal, coba fallback SimpleRejoin
+    RetryOnTeleportFail   = true,
 }
 
 task.wait(CONFIG.DelayBeforeStart)
@@ -107,8 +116,6 @@ local function compactVisited()
     warn(("[ServerHop] visited dikompres. Sekarang ~%d server disimpan."):format(countVisited()))
 end
 
-compactVisited()
-
 ----------------------------------------------------------------
 -- 👥 Load daftar teman (kalau anti friend on)
 ----------------------------------------------------------------
@@ -148,11 +155,13 @@ local function HasFriendInCurrentServer()
     return false
 end
 
-local hasFriend, friendName = HasFriendInCurrentServer()
-if hasFriend then
-    warn("[ServerHop] Ada teman di server ini:", friendName, "→ cari server lain.")
-else
-    print("[ServerHop] Tidak ada teman di server ini.")
+do
+    local hasFriend, friendName = HasFriendInCurrentServer()
+    if hasFriend then
+        warn("[ServerHop] Ada teman di server ini:", friendName, "→ cari server lain.")
+    else
+        print("[ServerHop] Tidak ada teman di server ini.")
+    end
 end
 
 ----------------------------------------------------------------
@@ -260,198 +269,238 @@ local function SafeHopRateLimited()
 end
 
 ----------------------------------------------------------------
--- 📄 Ambil server list (Advanced mode) + proteksi 429
+-- 🔁 SATU SIKLUS HOP (bisa dipanggil berulang untuk AFK)
 ----------------------------------------------------------------
-local cursor = nil
-local lastFetch = 0
-local RATE_LIMITED = false
+local function DoOneHop()
+    currentJobId = game.JobId  -- refresh kalau sudah pindah server
+    compactVisited()
 
-local function GetServers()
-    -- Cooldown antar request biar nggak spam API
-    local diff = os.clock() - lastFetch
-    if diff < CONFIG.FetchCooldown then
-        task.wait(CONFIG.FetchCooldown - diff)
-    end
-    lastFetch = os.clock()
+    ----------------------------------------------------------------
+    -- 📄 Ambil server list (Advanced mode) + proteksi 429
+    ----------------------------------------------------------------
+    local cursor    = nil
+    local lastFetch = 0
+    local RATE_LIMITED = false
 
-    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
-        :format(placeId)
+    local function GetServers()
+        -- Cooldown antar request biar nggak spam API
+        local diff = os.clock() - lastFetch
+        if diff < CONFIG.FetchCooldown then
+            task.wait(CONFIG.FetchCooldown - diff)
+        end
+        lastFetch = os.clock()
 
-    if cursor then
-        url = url .. "&cursor=" .. cursor
-    end
+        local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
+            :format(placeId)
 
-    local ok, result = pcall(function()
-        return game:HttpGet(url)
-    end)
-
-    if not ok then
-        local msg = tostring(result)
-        warn("[ServerHop] Gagal ambil server list:", msg)
-
-        if msg:find("429") or msg:find("Too Many Requests") then
-            RATE_LIMITED = true
+        if cursor then
+            url = url .. "&cursor=" .. cursor
         end
 
-        return nil
+        local ok, result = pcall(function()
+            return game:HttpGet(url)
+        end)
+
+        if not ok then
+            local msg = tostring(result)
+            warn("[ServerHop] Gagal ambil server list:", msg)
+
+            if msg:find("429") or msg:find("Too Many Requests") then
+                RATE_LIMITED = true
+            end
+
+            return nil
+        end
+
+        local decoded
+        local okDecode, errDecode = pcall(function()
+            decoded = HttpService:JSONDecode(result)
+        end)
+
+        if not okDecode then
+            warn("[ServerHop] Gagal decode JSON server list:", errDecode)
+            return nil
+        end
+
+        cursor = decoded.nextPageCursor
+        return decoded.data
     end
 
-    local decoded
-    local okDecode, errDecode = pcall(function()
-        decoded = HttpService:JSONDecode(result)
-    end)
+    ----------------------------------------------------------------
+    -- 🎲 Random start page (optional, default off)
+    ----------------------------------------------------------------
+    if CONFIG.RandomStartPage then
+        local maxSkip = math.max(0, CONFIG.MaxPagesToScan - 1)
+        local skipPages = math.random(0, maxSkip)
 
-    if not okDecode then
-        warn("[ServerHop] Gagal decode JSON server list:", errDecode)
-        return nil
+        for _ = 1, skipPages do
+            local servers = GetServers()
+            if not servers or not cursor or RATE_LIMITED then break end
+        end
+
+        print("[ServerHop] Mulai scan dari page acak, skip halaman:", skipPages)
     end
 
-    cursor = decoded.nextPageCursor
-    return decoded.data
-end
+    print(("[ServerHop] Mode: utama → %d–%d pemain"):format(CONFIG.MinPlayersMain, CONFIG.MaxPlayersMain))
+    print(("[ServerHop] Mode: backup → >= %d pemain"):format(CONFIG.MinPlayersBackup))
+    print(("[ServerHop] Mode: last_resort → >= %d pemain (lebih dari 1)")
+        :format(CONFIG.MinPlayersLastResort))
 
-----------------------------------------------------------------
--- 🎲 Random start page (optional, default off)
-----------------------------------------------------------------
-if CONFIG.RandomStartPage then
-    local maxSkip = math.max(0, CONFIG.MaxPagesToScan - 1)
-    local skipPages = math.random(0, maxSkip)
+    ----------------------------------------------------------------
+    -- 🔎 Kumpulkan kandidat server: utama / backup / last_resort
+    ----------------------------------------------------------------
+    local candidates  = {} -- utama
+    local backups     = {} -- backup
+    local lastResorts = {} -- last_resort
 
-    for _ = 1, skipPages do
-        local servers = GetServers()
-        if not servers or not cursor or RATE_LIMITED then break end
-    end
-
-    print("[ServerHop] Mulai scan dari page acak, skip halaman:", skipPages)
-end
-
-print(("[ServerHop] Mode: utama → %d–%d pemain"):format(CONFIG.MinPlayersMain, CONFIG.MaxPlayersMain))
-print(("[ServerHop] Mode: backup → >= %d pemain"):format(CONFIG.MinPlayersBackup))
-print(("[ServerHop] Mode: last_resort → >= %d pemain (lebih dari 1)")
-    :format(CONFIG.MinPlayersLastResort))
-
-----------------------------------------------------------------
--- 🔎 Kumpulkan kandidat server: utama / backup / last_resort
-----------------------------------------------------------------
-local candidates  = {} -- utama
-local backups     = {} -- backup
-local lastResorts = {} -- last_resort
-
-for page = 1, CONFIG.MaxPagesToScan do
-    if RATE_LIMITED then
-        break
-    end
-
-    local servers = GetServers()
-    if not servers then
+    for page = 1, CONFIG.MaxPagesToScan do
         if RATE_LIMITED then
             break
         end
-        warn("[ServerHop] Server list kosong / gagal di page", page)
-        break
-    end
 
-    for _, server in ipairs(servers) do
-        local sid       = server.id
-        local playing   = server.playing
-        local maxPlr    = server.maxPlayers
+        local servers = GetServers()
+        if not servers then
+            if RATE_LIMITED then
+                break
+            end
+            warn("[ServerHop] Server list kosong / gagal di page", page)
+            break
+        end
 
-        local notFull    = playing < maxPlr
-        local notVisited = (not CONFIG.RememberVisited) or (not visited[sid])
-        local notCurrent = sid ~= currentJobId
+        for _, server in ipairs(servers) do
+            local sid       = server.id
+            local playing   = server.playing
+            local maxPlr    = server.maxPlayers
 
-        if notFull and notVisited and notCurrent then
-            local info = {
-                id      = sid,
-                playing = playing,
-                max     = maxPlr,
-                score   = 0,
-            }
+            local notFull    = playing < maxPlr
+            local notVisited = (not CONFIG.RememberVisited) or (not visited[sid])
+            local notCurrent = sid ~= currentJobId
 
-            if playing >= CONFIG.MinPlayersMain and playing <= CONFIG.MaxPlayersMain then
-                -- Mode utama: 4–15 player, makin dekat tengah makin bagus
-                local mid  = (CONFIG.MinPlayersMain + CONFIG.MaxPlayersMain) / 2
-                local dist = math.abs(playing - mid)
-                info.score = -dist + math.random()
-                table.insert(candidates, info)
+            if notFull and notVisited and notCurrent then
+                local info = {
+                    id      = sid,
+                    playing = playing,
+                    max     = maxPlr,
+                    score   = 0,
+                }
 
-            elseif playing >= CONFIG.MinPlayersBackup then
-                -- Mode backup: 3+ player, makin rame makin bagus
-                info.score = playing + math.random()
-                table.insert(backups, info)
+                if playing >= CONFIG.MinPlayersMain and playing <= CONFIG.MaxPlayersMain then
+                    -- Mode utama: 4–15 player, makin dekat tengah makin bagus
+                    local mid  = (CONFIG.MinPlayersMain + CONFIG.MaxPlayersMain) / 2
+                    local dist = math.abs(playing - mid)
+                    info.score = -dist + math.random()
+                    table.insert(candidates, info)
 
-            elseif playing >= CONFIG.MinPlayersLastResort then
-                -- Mode last_resort: 2+ player, game sepi tapi tetap >1
-                info.score = playing + math.random()
-                table.insert(lastResorts, info)
+                elseif playing >= CONFIG.MinPlayersBackup then
+                    -- Mode backup: 3+ player, makin rame makin bagus
+                    info.score = playing + math.random()
+                    table.insert(backups, info)
+
+                elseif playing >= CONFIG.MinPlayersLastResort then
+                    -- Mode last_resort: 2+ player, game sepi tapi tetap >1
+                    info.score = playing + math.random()
+                    table.insert(lastResorts, info)
+                end
             end
         end
-    end
 
-    if not cursor then
-        break
-    end
-end
-
-if RATE_LIMITED then
-    SafeHopRateLimited()
-    return
-end
-
--- Fungsi pilih server dengan score terbaik dari list
-local function pickBest(list)
-    if #list == 0 then return nil end
-    local best = list[1]
-    for i = 2, #list do
-        if list[i].score > best.score then
-            best = list[i]
+        if not cursor then
+            break
         end
     end
-    return best
-end
 
-local target = pickBest(candidates)
-local mode   = "utama"
+    if RATE_LIMITED then
+        SafeHopRateLimited()
+        return
+    end
 
-if not target then
-    if #backups > 0 then
-        target = pickBest(backups)
-        mode   = "backup"
-        warn("[ServerHop] Mode backup aktif → pakai server >2 pemain (3+).")
-    elseif #lastResorts > 0 then
-        target = pickBest(lastResorts)
-        mode   = "last_resort"
-        warn("[ServerHop] Mode last_resort aktif → game sepi, pakai server terbaik yang >1 pemain.")
+    -- Fungsi pilih server dengan score terbaik dari list
+    local function pickBest(list)
+        if #list == 0 then return nil end
+        local best = list[1]
+        for i = 2, #list do
+            if list[i].score > best.score then
+                best = list[i]
+            end
+        end
+        return best
+    end
+
+    local target = pickBest(candidates)
+    local mode   = "utama"
+
+    if not target then
+        if #backups > 0 then
+            target = pickBest(backups)
+            mode   = "backup"
+            warn("[ServerHop] Mode backup aktif → pakai server >2 pemain (3+).")
+        elseif #lastResorts > 0 then
+            target = pickBest(lastResorts)
+            mode   = "last_resort"
+            warn("[ServerHop] Mode last_resort aktif → game sepi, pakai server terbaik yang >1 pemain.")
+        end
+    end
+
+    if not target then
+        warn("[ServerHop] Tidak ada server lain yang memenuhi semua mode. Simple rejoin dengan cooldown + anti visited.")
+        SimpleRejoin()
+        return
+    end
+
+    ----------------------------------------------------------------
+    -- 🚀 Teleport ke server target (log JobId juga)
+    ----------------------------------------------------------------
+    print(("[ServerHop] Mode: %s | Teleport ke server (%d/%d pemain)")
+        :format(mode, target.playing, target.max))
+    print(("[ServerHop] JobId target: %s"):format(target.id))
+
+    if CONFIG.RememberVisited then
+        visited[target.id] = true
+    end
+
+    local okTp, tpErr = pcall(function()
+        TeleportService:TeleportToPlaceInstance(placeId, target.id, LocalPlayer)
+    end)
+
+    if not okTp then
+        local errStr = tostring(tpErr)
+        warn("[ServerHop] Teleport gagal:", errStr)
+
+        if errStr:find("773") or errStr:lower():find("restricted") then
+            warn("[ServerHop] Error 773 (tempat/server dibatasi Roblox). " ..
+                 "Ini batas dari Roblox, bukan dari script. Coba lagi nanti atau ganti game.")
+        end
+
+        if CONFIG.RetryOnTeleportFail then
+            warn("[ServerHop] Coba fallback SimpleRejoin setelah teleport gagal.")
+            SimpleRejoin()
+        end
     end
 end
 
-if not target then
-    warn("[ServerHop] Tidak ada server lain yang memenuhi semua mode. Simple rejoin dengan cooldown + anti visited.")
-    SimpleRejoin()
-    return
-end
-
 ----------------------------------------------------------------
--- 🚀 Teleport ke server target (log JobId juga)
+-- 🔁 MAIN LOOP – UNTUK AFK JANGKA PANJANG
 ----------------------------------------------------------------
-print(("[ServerHop] Mode: %s | Teleport ke server (%d/%d pemain)")
-    :format(mode, target.playing, target.max))
-print(("[ServerHop] JobId target: %s"):format(target.id))
+local function RunLoop()
+    if not CONFIG.AutoLoop then
+        -- sekali jalan saja
+        local ok, err = pcall(DoOneHop)
+        if not ok then
+            warn("[ServerHop] Error di DoOneHop:", err)
+        end
+        return
+    end
 
-if CONFIG.RememberVisited then
-    visited[target.id] = true
-end
+    while true do
+        local ok, err = pcall(DoOneHop)
+        if not ok then
+            warn("[ServerHop] Error di DoOneHop:", err)
+        end
 
-local okTp, tpErr = pcall(function()
-    TeleportService:TeleportToPlaceInstance(placeId, target.id, LocalPlayer)
-end)
-
-if not okTp then
-    local errStr = tostring(tpErr)
-    warn("[ServerHop] Teleport gagal:", errStr)
-
-    if errStr:find("773") or errStr:lower():find("restricted") then
-        warn("[ServerHop] Error 773 (tempat/server dibatasi Roblox). " ..
-             "Ini batas dari Roblox, bukan dari script. Coba lagi nanti atau ganti game.")
+        local pause = math.random(CONFIG.LoopDelayMin, CONFIG.LoopDelayMax)
+        warn(("[ServerHop] Jeda %d detik sebelum hop berikutnya."):format(pause))
+        task.wait(pause)
     end
 end
+
+RunLoop()
