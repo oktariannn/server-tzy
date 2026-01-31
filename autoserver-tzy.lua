@@ -1,5 +1,5 @@
 --==[ ADVANCED SERVER HOPPER – 3 MODE + COOLDOWN + PARTIAL RESET
---     + SMART SIMPLE + JOBID LOG + AUTO LOOP ]==--
+--     + SMART SIMPLE + JOBID LOG + AUTO LOOP + SAFE TELEPORT ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -38,7 +38,7 @@ local CONFIG = {
     -- 🔁 AUTO-LOOP UNTUK AFK JANGKA PANJANG
     AutoLoop              = true, -- true = hop terus menerus
     LoopDelayMin          = 30,   -- jeda minimal antar HOP (detik)
-    LoopDelayMax          = 60,  -- jeda maksimal antar HOP (detik)
+    LoopDelayMax          = 60,   -- jeda maksimal antar HOP (detik)
 
     -- Kalau teleport utama gagal, coba fallback SimpleRejoin
     RetryOnTeleportFail   = true,
@@ -55,6 +55,54 @@ local placeId      = game.PlaceId
 local currentJobId = game.JobId
 
 math.randomseed(os.time())
+
+----------------------------------------------------------------
+-- 🛡 SAFE TELEPORT (anti IsTeleporting / spam)
+----------------------------------------------------------------
+local TeleportInProgress = false
+local LastTeleportTime   = 0
+local TELEPORT_TIMEOUT   = 20 -- detik; kalau lebih dari ini, anggap teleport nyangkut dan reset
+
+local function SafeTeleport(targetPlaceId, targetJobId)
+    if TeleportInProgress then
+        local dt = os.clock() - LastTeleportTime
+        if dt < TELEPORT_TIMEOUT then
+            warn(("[ServerHop] Teleport masih diproses (%.1fs), skip dulu."):format(dt))
+            return false
+        else
+            warn("[ServerHop] Teleport timeout, reset status TeleportInProgress.")
+            TeleportInProgress = false
+        end
+    end
+
+    TeleportInProgress = true
+    LastTeleportTime   = os.clock()
+
+    local ok, err = pcall(function()
+        if targetJobId then
+            TeleportService:TeleportToPlaceInstance(targetPlaceId, targetJobId, LocalPlayer)
+        else
+            TeleportService:Teleport(targetPlaceId, LocalPlayer)
+        end
+    end)
+
+    if not ok then
+        TeleportInProgress = false
+        local msg = tostring(err)
+        warn("[ServerHop] Teleport error:", msg)
+
+        if msg:find("IsTeleporting") then
+            -- biar tidak spam, kita biarkan TeleportInProgress tetap true selama belum timeout
+            -- tapi sudah kita handle di awal fungsi
+        end
+
+        return false
+    end
+
+    -- kalau sukses, script biasanya tidak lanjut (karena pindah place),
+    -- tapi kalau pun lanjut, biarkan TeleportInProgress tetap true sampai timeout.
+    return true
+end
 
 ----------------------------------------------------------------
 -- 🔁 visited server list (supaya ingat lewat teleport)
@@ -224,12 +272,7 @@ local function SimpleRejoin()
                     visited[best.id] = true
                 end
 
-                local okTp, errTp = pcall(function()
-                    TeleportService:TeleportToPlaceInstance(placeId, best.id, LocalPlayer)
-                end)
-                if not okTp then
-                    warn("[ServerHop] Teleport smart simple gagal:", errTp)
-                end
+                SafeTeleport(placeId, best.id)
                 return
             else
                 warn("[ServerHop] Smart simple: tidak ada server lain (semua visited/penuh/0 player).")
@@ -243,12 +286,7 @@ local function SimpleRejoin()
 
     -- Fallback terakhir: benar-benar rejoin random
     warn("[ServerHop] Smart simple gagal, rejoin random server.")
-    local okTp, err = pcall(function()
-        TeleportService:Teleport(placeId, LocalPlayer)
-    end)
-    if not okTp then
-        warn("[ServerHop] Teleport simple gagal:", err)
-    end
+    SafeTeleport(placeId)
 end
 
 ----------------------------------------------------------------
@@ -260,12 +298,7 @@ local function SafeHopRateLimited()
         :format(waitTime))
     task.wait(waitTime)
 
-    local okTp, err = pcall(function()
-        TeleportService:Teleport(placeId, LocalPlayer)
-    end)
-    if not okTp then
-        warn("[ServerHop] Teleport SAFE-HOP gagal:", err)
-    end
+    SafeTeleport(placeId)
 end
 
 ----------------------------------------------------------------
@@ -458,23 +491,11 @@ local function DoOneHop()
         visited[target.id] = true
     end
 
-    local okTp, tpErr = pcall(function()
-        TeleportService:TeleportToPlaceInstance(placeId, target.id, LocalPlayer)
-    end)
+    local okTeleport = SafeTeleport(placeId, target.id)
 
-    if not okTp then
-        local errStr = tostring(tpErr)
-        warn("[ServerHop] Teleport gagal:", errStr)
-
-        if errStr:find("773") or errStr:lower():find("restricted") then
-            warn("[ServerHop] Error 773 (tempat/server dibatasi Roblox). " ..
-                 "Ini batas dari Roblox, bukan dari script. Coba lagi nanti atau ganti game.")
-        end
-
-        if CONFIG.RetryOnTeleportFail then
-            warn("[ServerHop] Coba fallback SimpleRejoin setelah teleport gagal.")
-            SimpleRejoin()
-        end
+    if (not okTeleport) and CONFIG.RetryOnTeleportFail then
+        warn("[ServerHop] Teleport utama gagal / ditolak, fallback ke SimpleRejoin.")
+        SimpleRejoin()
     end
 end
 
